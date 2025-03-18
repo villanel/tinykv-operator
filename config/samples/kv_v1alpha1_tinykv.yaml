@@ -1,0 +1,32 @@
+apiVersion: kv.villanel.io/v1alpha1
+kind: Tinykv
+metadata:
+  labels:
+    app.kubernetes.io/name: tinykv-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: tinykv-sample
+spec:
+  tinyschedule:
+    replicas: 1
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+    storage:
+      size: "10Gi"
+      storageClassName: nfs
+  tinykv:
+    replicas: 5
+    resources:
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+    storage:
+      size: "20Gi"
+      storageClassName: nfs
