@@ -18,14 +18,18 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -40,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/juju/errors"
 	kvv1alpha1 "github.com/villanel/api/v1alpha1"
 	"github.com/villanel/tinykv-scheduler/kv/raftstore/scheduler_client"
@@ -110,27 +115,59 @@ func (r *TinykvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// 3. 部署 TinyKV
-	if err := r.deployTinyKV(ctx, instance); err != nil {
+	if ctrlRes, err := r.deployTinyKV(ctx, instance); err != nil {
 		logger.Error(err, "Failed to reconcile TinyKV")
-		return ctrl.Result{}, err
+		return ctrlRes, err
 	}
 
 	// 4. 检查 TinyKV 就绪状态
-	kvReady, _, err := r.checkKVReadiness(ctx, instance)
+	kvReady, resTime, err := r.checkKVReadiness(ctx, instance)
 	if err != nil {
-		return ctrl.Result{}, err
+		return resTime, err
 	}
 
 	if !kvReady {
+		// 保存原始状态深拷贝
+		originalStatus := instance.Status.DeepCopy()
+
+		// ...修改 instance.Status 的逻辑...
+
 		if !reflect.DeepEqual(originalStatus, &instance.Status) {
+			// 记录尝试更新的状态
+			attemptedStatus := instance.Status.DeepCopy()
+
+			// 尝试更新状态
 			if err := r.Status().Update(ctx, instance); err != nil {
 				logger.Error(err, "Failed to update KVReady status")
-				return ctrl.Result{}, err
+
+				// 重新获取最新实例
+				latestInstance := &kvv1alpha1.Tinykv{}
+
+				if errGet := r.Get(ctx, req.NamespacedName, latestInstance); errGet != nil {
+					logger.Error(errGet, "Failed to re-fetch instance after update failure")
+					return ctrl.Result{}, err
+				}
+
+				// 打印关键差异信息（使用 JSON 序列化增强可读性）
+				attemptedJSON, _ := json.MarshalIndent(attemptedStatus, "", "  ")
+				latestJSON, _ := json.MarshalIndent(latestInstance.Status, "", "  ")
+				logger.Info("Status conflict detected",
+					"attempted", string(attemptedJSON),
+					"current", string(latestJSON))
+
+				// 使用 diff 库显示结构化差异
+				diff := cmp.Diff(attemptedStatus, &latestInstance.Status,
+					cmp.Transformer("Time", func(t metav1.Time) string {
+						return t.Format(time.RFC3339)
+					}))
+				logger.Info("Detailed diff", "difference", diff)
+
+				// 带指数避退的重试
+				return ctrl.Result{RequeueAfter: calculateBackoff(err)}, err
 			}
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
-
 	// 所有组件就绪，更新状态
 	if !reflect.DeepEqual(originalStatus, &instance.Status) {
 		if err := r.Status().Update(ctx, instance); err != nil {
@@ -332,7 +369,7 @@ func (r *TinykvReconciler) checkScheduleReadiness(ctx context.Context, instance 
 	return ready, ctrl.Result{}, nil
 }
 
-func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha1.Tinykv) error {
+func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha1.Tinykv) (ctrl.Result, error) {
 
 	logger := log.FromContext(ctx)
 	svc := &corev1.Service{
@@ -362,7 +399,7 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to reconcile Service: %v", err)
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile Service: %v", err)
 	}
 	logger.V(1).Info("Service reconciled", "operation", svcOp)
 	// 处理副本数默认值
@@ -371,37 +408,61 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 		replicas = *instance.Spec.TinyKV.Replicas
 	}
 
-	// 创建或更新 StatefulSet
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "tinykv",
 			Namespace: instance.Namespace,
 		},
 	}
+
+	// 获取现有StatefulSet信息
 	existingSts := &appsv1.StatefulSet{}
 	err = r.Client.Get(ctx, client.ObjectKeyFromObject(sts), existingSts)
-	var oldReplicas int32 = 0
-	if err == nil && existingSts.Spec.Replicas != nil {
-		oldReplicas = *existingSts.Spec.Replicas
-	} else if !errors.Is(err, errors.NotFound) {
-		return fmt.Errorf("failed to check existing StatefulSet: %v", err)
+	var (
+		oldReplicas int32 = 0
+		stsExists   bool  = true
+	)
+
+	// 处理StatefulSet查询结果
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			fmt.Println("errrrrrrrrrrrrrrrrrrrrrrrrr")
+			// 标记StatefulSet不存在
+			stsExists = false
+		} else {
+			return ctrl.Result{}, fmt.Errorf("failed to check existing StatefulSet: %w", err)
+		}
+	} else {
+		// 获取当前副本数（处理未显式设置的情况）
+		if existingSts.Spec.Replicas != nil {
+			oldReplicas = *existingSts.Spec.Replicas
+		} else {
+			oldReplicas = 1 // Kubernetes默认值
+		}
 	}
 
-	// 判断是否需要触发缩容
+	// 当StatefulSet存在且需要缩容时处理
 	newReplicas := *instance.Spec.TinyKV.Replicas
-	if newReplicas < oldReplicas {
+	if stsExists && newReplicas < oldReplicas {
 		if err := r.handleScaleDown(ctx, instance, int(oldReplicas), int(newReplicas)); err != nil {
-			return fmt.Errorf("scale down handler failed: %v", err)
+			return ctrl.Result{}, fmt.Errorf("scale down handler failed: %w", err)
 		}
 	}
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		controllerutil.SetControllerReference(instance, sts, r.Scheme)
-		sts.Spec.ServiceName = "tinykv"
-		sts.Spec.Replicas = &replicas
-		sts.Spec.Selector = &metav1.LabelSelector{
+	newSts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tinykv",
+			Namespace: instance.Namespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, newSts, func() error {
+		controllerutil.SetControllerReference(instance, newSts, r.Scheme)
+		newSts.Spec.ServiceName = "tinykv"
+		newSts.Spec.Replicas = &replicas
+		newSts.Spec.Selector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{"app": "tinykv"},
 		}
-		sts.Spec.Template = corev1.PodTemplateSpec{
+		newSts.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{"app": "tinykv"},
 			},
@@ -447,7 +508,7 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 		// 设置VolumeClaimTemplates
 		storageClassName := instance.Spec.TinyKV.Storage.StorageClassName
 		storageSize := resource.MustParse(instance.Spec.TinyKV.Storage.Size)
-		sts.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+		newSts.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
 			{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   "data",
@@ -464,7 +525,7 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 				},
 			},
 		}
-		sts.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+		newSts.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
 			WhenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
 			WhenScaled:  appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
 		}
@@ -472,11 +533,11 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to reconcile StatefulSet: %v", err)
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile StatefulSet: %v", err)
 	}
 	logger.V(1).Info("StatefulSet reconciled", "operation", op)
 
-	return nil
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 func (r *TinykvReconciler) handleScaleDown(
 	ctx context.Context,
@@ -498,53 +559,97 @@ func (r *TinykvReconciler) handleScaleDown(
 	}
 
 	// 构建Pod序号到StoreID的映射
+
 	storeMap := make(map[int]uint64)
+	// 1. 构建Pod序号到StoreID的映射
 	for _, store := range stores {
-		// 从地址中解析Pod序号，例如tinykv-3对应序号3
 		matches := regexp.MustCompile(`tinykv-(\d+)`).FindStringSubmatch(store.Address)
 		if len(matches) < 2 {
+			fmt.Printf("WARN: invalid store address format: %s\n", store.Address)
+
 			continue
 		}
-		index, _ := strconv.Atoi(matches[1])
+
+		index, err := strconv.Atoi(matches[1])
+		if err != nil {
+			fmt.Printf("WARN: invalid pod index in address %s: %v\n", store.Address, err)
+			continue
+		}
 		storeMap[index] = store.GetId()
 	}
-	fmt.Println(storeMap)
-	// 确定需要下线的节点范围（从最高序号开始处理）
-	for podIndex := oldReplicas - 1; podIndex >= newReplicas; podIndex-- {
-		storeID, exists := storeMap[podIndex]
 
-		println("progress StoreID", storeID)
-		if !exists {
-			continue
+	// 2. 动态确定需要清理的Pod范围
+	var candidates []int
+	for podIndex := range storeMap {
+		if podIndex >= newReplicas { // 处理所有>=新副本数的Pod
+			candidates = append(candidates, podIndex)
 		}
+	}
+	// 降序排序确保从最高序号开始处理
+	sort.Sort(sort.Reverse(sort.IntSlice(candidates)))
 
-		// 获取存储节点详细信息
+	// 3. 执行清理操作
+	var errs []error
+	for _, podIndex := range candidates {
+		storeID := storeMap[podIndex]
+		fmt.Printf("DEBUG: Processing pod %d (store %d)\n", podIndex, storeID)
+
 		store, err := schedulerClient.GetStore(ctx, storeID)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("get store %d (pod %d) failed: %v", storeID, podIndex, err))
 			continue
 		}
 
 		switch store.GetState() {
 		case metapb.StoreState_Up:
-			// 发起下线请求
 			if _, err := schedulerClient.OfflineStore(ctx, storeID); err != nil {
-				return fmt.Errorf("failed to offline store %d: %v", storeID, err)
+				errs = append(errs, fmt.Errorf("offline store %d (pod %d) failed: %v", storeID, podIndex, err))
+				continue
 			}
-			// 等待节点状态变为Tombstone（需要实现重试逻辑）
 			if err := waitForStoreTombstone(ctx, schedulerClient, storeID); err != nil {
-				return err
+				errs = append(errs, fmt.Errorf("wait tombstone for store %d (pod %d) failed: %v", storeID, podIndex, err))
+				continue
 			}
 			fallthrough
 
 		case metapb.StoreState_Tombstone:
-			// 直接移除
 			if _, err := schedulerClient.RemoveStore(ctx, storeID); err != nil {
-				return fmt.Errorf("failed to remove store %d: %v", storeID, err)
+				errs = append(errs, fmt.Errorf("remove store %d (pod %d) failed: %v", storeID, podIndex, err))
 			}
+
+		case metapb.StoreState_Offline:
+			if err := waitForStoreTombstone(ctx, schedulerClient, storeID); err != nil {
+				errs = append(errs, fmt.Errorf("wait offline store %d (pod %d) failed: %v", storeID, podIndex, err))
+				continue
+			}
+			if _, err := schedulerClient.RemoveStore(ctx, storeID); err != nil {
+				errs = append(errs, fmt.Errorf("remove offline store %d (pod %d) failed: %v", storeID, podIndex, err))
+			}
+
+		default:
+			errs = append(errs, fmt.Errorf("store %d (pod %d) in unexpected state: %s",
+				storeID, podIndex, store.GetState().String()))
 		}
 	}
 
+	// 4. 统一处理错误
+	if len(errs) > 0 {
+		return &CleanError{Errors: errs}
+	}
 	return nil
+}
+
+type CleanError struct {
+	Errors []error
+}
+
+func (e *CleanError) Error() string {
+	var sb strings.Builder
+	sb.WriteString("store cleanup errors:\n")
+	for _, err := range e.Errors {
+		sb.WriteString(fmt.Sprintf("• %s\n", err.Error()))
+	}
+	return sb.String()
 }
 
 // 等待存储节点变为Tombstone状态（需要实现超时和重试）
@@ -563,7 +668,7 @@ func (r *TinykvReconciler) checkKVReadiness(ctx context.Context, instance *kvv1a
 		Name:      "tinykv",
 		Namespace: instance.Namespace,
 	}, sts); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			meta.SetStatusCondition(&instance.Status.TinyKVStatus.Conditions, metav1.Condition{
 				Type:    "Available",
 				Status:  metav1.ConditionFalse,
@@ -601,7 +706,7 @@ func (r *TinykvReconciler) checkKVReadiness(ctx context.Context, instance *kvv1a
 	instance.Status.TinyKVStatus.ResourceAllocations = calculateResourceAllocations(sts)
 	instance.Status.TinyKVStatus.PersistentVolumes, _ = getPersistentVolumes(ctx, r.Client, instance.Namespace, "tinykv")
 
-	return ready, ctrl.Result{}, nil
+	return ready, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 // 增强资源计算（支持多资源类型和初始化请求）
@@ -668,4 +773,10 @@ func (r *TinykvReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		)).
 		Named("tinykv-operator").
 		Complete(r)
+}
+func calculateBackoff(err error) time.Duration {
+	if apierrors.IsConflict(err) {
+		return 1 * time.Second // 冲突快速重试
+	}
+	return 5 * time.Second // 其他错误常规间隔
 }
