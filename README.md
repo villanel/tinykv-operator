@@ -1,6 +1,6 @@
-# tinykv
+# TinyKV
 
-**tinykv** is a high-performance distributed cache server written in Go. It is designed for consistency, scalability, and Redis protocol compatibility in a distributed environment.
+**TinyKV** is a high-performance distributed cache server written in Go. It is designed for consistency, scalability, and Redis protocol compatibility in a distributed environment.
 
 ## ✨ Features
 
