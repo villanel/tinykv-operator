@@ -1,8 +1,46 @@
-# tinykv-operator
-// TODO(user): Add simple overview of use/purpose
+# tinykv
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+**tinykv** is a high-performance distributed cache server written in Go. It is designed for consistency, scalability, and Redis protocol compatibility in a distributed environment.
+
+## ✨ Features
+
+- **Raft-Based Consensus**: Ensures strong consistency and fault tolerance using the Raft protocol.
+- **Multi-Raft Architecture**: Supports multiple Raft groups to overcome the performance bottleneck of a single Raft, allowing efficient handling of concurrent client requests.
+- **Key-Aware Load Balancing**: Integrates with TinySchedule to help clients locate the region of a given key, enabling dynamic load balancing across the cluster.
+- **RESP Protocol Support**: Fully implements the Redis Serialization Protocol (RESP), supporting all standard Redis clients out-of-the-box.
+- **Region Balancing**: Implements region-balancing algorithms in TinySchedule by adjusting peer and leader placement across nodes to achieve balanced data and network usage.
+
+## Base Works
+
+
+tinykv is adapted and extended from the following open-source project:
+
+- [TinyKV Course (Talent Plan)](https://github.com/talent-plan/tinykv)
+- [RedisGO GitHub Repository](https://github.com/innovationb1ue/RedisGO/tree/Main)
+
+## TinyKV Operator
+
+The **TinyKV Operator** is a Kubernetes custom controller designed to manage distributed key-value store clusters composed of **TinyKV** and **TinySchedule** components. It simplifies the deployment, scaling, and maintenance of these clusters within a Kubernetes environment.
+
+### Description
+
+#### **Two-Phase Deployment**
+
+The operator adopts a sequential, two-phase deployment strategy to ensure a stable setup:
+
+- **Control Plane**: Deploys TinySchedule first to establish the scheduling and load-balancing framework.
+- **Data Plane and Client**: Deploys the TinyKV data plane followed by the TinyKV client, ensuring the control plane is fully operational before the data layer and client components are initialized.
+
+This phased approach guarantees correct configuration and minimizes potential runtime issues.
+
+#### **Stateful Management**
+
+The TinyKV Operator provides robust mechanisms for managing the stateful aspects of the cluster:
+- **Scaling Up**: Ensures smooth cluster expansion by integrating new nodes without conflicts. TinySchedule will subtly adjust leaders and region placement to maintain balance and effectiveness.
+- **Scaling Down**: Carefully removes storage nodes from the scheduling system, avoiding disruptions to the Raft consensus mechanism (e.g., leader downtime or unnecessary leader elections). It also cleans up associated metadata to prevent ID duplication during future scaling operations.
+- **Resource-Aware Scaling**: Monitors cluster load and leverages **Horizontal Pod Autoscaling (HPA)** to dynamically adjust the number of pods based on demand.
+
+> **Note:** A planned enhancement (currently marked as TODO) involves leveraging native TinySchedule information to improve the accuracy and efficiency of scaling triggers.
 
 ## Getting Started
 
