@@ -69,6 +69,8 @@ type StorageSpec struct {
 
 // TinykvStatus 定义集群的观测状态
 type TinykvStatus struct {
+	Selector string `json:"selector,omitempty"` // Pod 选择器
+
 	// 记录 TinySchedule 的状态
 	TinyScheduleStatus ComponentStatus `json:"tinyscheduleStatus,omitempty"`
 
@@ -93,6 +95,7 @@ type ComponentStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.tinykv.replicas,statuspath=.status.tinykvStatus.readyReplicas,selectorpath=.status.selector
 
 // Tinykv is the Schema for the tinykvs API.
 type Tinykv struct {

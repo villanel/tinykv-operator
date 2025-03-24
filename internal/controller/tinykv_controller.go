@@ -30,6 +30,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -71,6 +72,7 @@ const (
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -103,7 +105,6 @@ func (r *TinykvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err != nil {
 		return result, err
 	}
-
 	if !scheduleReady {
 		if !reflect.DeepEqual(originalStatus, &instance.Status) {
 			if err := r.Status().Update(ctx, instance); err != nil {
@@ -114,6 +115,13 @@ func (r *TinykvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
+	labels := map[string]string{"app": instance.Name}
+	selector := &metav1.LabelSelector{MatchLabels: labels}
+	instance.Status.Selector = metav1.FormatLabelSelector(selector)
+	if err := r.Status().Update(ctx, instance); err != nil {
+		logger.Error(err, "Failed to update ScheduleReady status")
+		return ctrl.Result{}, err
+	}
 	// 3. 部署 TinyKV
 	if ctrlRes, err := r.deployTinyKV(ctx, instance); err != nil {
 		logger.Error(err, "Failed to reconcile TinyKV")
@@ -455,16 +463,18 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 		},
 	}
 
+	labels := map[string]string{"app": instance.Name}
+
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, newSts, func() error {
 		controllerutil.SetControllerReference(instance, newSts, r.Scheme)
 		newSts.Spec.ServiceName = "tinykv"
 		newSts.Spec.Replicas = &replicas
 		newSts.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{"app": "tinykv"},
+			MatchLabels: labels,
 		}
 		newSts.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Labels: map[string]string{"app": "tinykv"},
+				Labels: labels,
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
@@ -536,6 +546,48 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile StatefulSet: %v", err)
 	}
 	logger.V(1).Info("StatefulSet reconciled", "operation", op)
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Name + "-hpa", // HPA 名称：<instance-name>-hpa
+			Namespace: instance.Namespace,
+		},
+	}
+
+	// 固定 HPA 参数（可根据需求调整）
+	minReplicas := int32(3)
+	maxReplicas := int32(10)
+	targetCPUUtilization := int32(80)
+	// 创建或更新 HPA
+	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, hpa, func() error {
+		controllerutil.SetControllerReference(instance, hpa, r.Scheme) // 绑定 OwnerReference
+		hpa.Spec = autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: instance.APIVersion,
+				Kind:       instance.Kind,
+				Name:       instance.Name, // 指向对应的 StatefulSet
+			},
+			MinReplicas: &minReplicas,
+			MaxReplicas: maxReplicas,
+			Metrics: []autoscalingv2.MetricSpec{
+				{
+					Type: autoscalingv2.ResourceMetricSourceType,
+					Resource: &autoscalingv2.ResourceMetricSource{
+						Name: corev1.ResourceCPU,
+						Target: autoscalingv2.MetricTarget{
+							Type:               autoscalingv2.UtilizationMetricType,
+							AverageUtilization: &targetCPUUtilization,
+						},
+					},
+				},
+			},
+		}
+		return nil
+	})
+
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile HPA: %v", err)
+	}
+	logger.V(1).Info("HPA reconciled", "operation", op)
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }

@@ -199,6 +199,8 @@ spec:
           status:
             description: TinykvStatus 定义集群的观测状态
             properties:
+              selector:
+                type: string
               tinykvStatus:
                 description: 记录 TinyKV 的状态
                 properties:
@@ -368,4 +370,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.tinykv.replicas
+        statusReplicasPath: .status.tinykvStatus.readyReplicas
       status: {}
