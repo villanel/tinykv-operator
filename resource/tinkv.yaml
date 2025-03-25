@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tinykv
+spec:
+  serviceName: tinykv  # 关联 Headless Service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tinykv  # 必须与 template.metadata.labels 一致
+  template:
+    metadata:
+      labels:
+        app: tinykv  # 必须包含 selector.matchLabels 的标签
+    spec:
+      containers:
+      - name: tinykv
+        image: villanel/tinykv-server:latest
+        env:
+        - name: POD_NAME  # 通过 Downward API 获取 Pod 名称（如 t-0）
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: SERVICE_DNS  # Headless Service 的完整 DNS 名称
+          value: "tinykv.default.svc.cluster.local"
+          value: "tinykv"  # 集群名称，需与 StatefulSet 名称一致
+        command: ["/usr/local/bin/tinykv-server"]
+        args:
+        - "--addr=$(POD_NAME).$(SERVICE_DNS):20160"
+        - "-path=data"
+        - "-scheduler=tinyschedule.default.svc.cluster.local:2379"
+        ports:
+        - containerPort: 20160
+          name: client
+        - containerPort: 2380
+          name: peer
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/tinykv
+  volumeClaimTemplates:  # 持久化存储模板
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

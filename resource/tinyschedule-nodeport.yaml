@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinyschedule-nodeport  # 名称不能与原有 Service 重复
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: tinyschedule  # 必须与原有 Service 的 selector 一致
+  ports:
+  - name: client
+    port: 2379          # Service 端口（集群内访问）
+    targetPort: 2379    # Pod 端口
+    nodePort: 30007     # 节点端口（外部访问，可选范围 30000-32767）
+    protocol: TCP
+  - name: peer
+    port: 2380
+    targetPort: 2380
+    nodePort: 30008
+    protocol: TCP

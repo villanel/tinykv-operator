@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinyschedule  # Headless Service 名称
+spec:
+  clusterIP: None  # Headless 模式
+  selector:
+    app: tinyschedule  # 匹配 Deployment 中 Pod 的标签
+  ports:
+  - name: client      # 客户端通信端口（对应 --client-urls）
+    port: 2379
+    targetPort: 2379
+  - name: peer        # 节点间通信端口（对应 --peer-urls）
+    port: 2380
+    targetPort: 2380

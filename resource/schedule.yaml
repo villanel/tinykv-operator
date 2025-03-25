@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tinyschedule
+spec:
+  replicas: 1
+  selector:  # 必填字段，定义如何选择 Pod
+    matchLabels:
+      app: tinyschedule  # 必须与 template.labels 一致
+  template:  # Pod 模板
+    metadata:
+      labels:  # 必须包含 selector.matchLabels 中的所有标签
+        app: tinyschedule
+    spec:
+      containers:
+      - name: tinyschedule
+        image: villanel/tinyscheduler-server:latest
+        env:
+        - name: POD_NAME  # 通过 Downward API 获取 Pod 名称（如 t-0）
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        command: ["/usr/local/bin/tinyscheduler-server"]
+        args:
+        - "--client-urls=http://0.0.0.0:2379"
+        - "--peer-urls=http://0.0.0.0:2380"
+        - "--advertise-client-urls=http://tinyschedule.default.svc.cluster.local:2379"
+        - "--advertise-peer-urls=http://tinyschedule.default.svc.cluster.local:2380"

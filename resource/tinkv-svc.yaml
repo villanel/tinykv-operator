@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinykv  # 必须与 StatefulSet 的 serviceName 一致
+spec:
+  clusterIP: None  # Headless 模式
+  ports:
+  - name: client    # 对应 containerPort 20160
+    port: 20160
+    targetPort: 20160
+  selector:
+    app: tinykv     # 匹配 StatefulSet 的 Pod 标签
