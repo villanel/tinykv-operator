@@ -293,8 +293,9 @@ func (r *TinykvReconciler) deployTinySchedule(ctx context.Context, instance *kvv
 		if err := controllerutil.SetControllerReference(instance, pvc, r.Scheme); err != nil {
 			return err
 		}
-
-		// 只在PVC不存在时初始化不可变字段
+		if instance.Spec.TinySchedule.Storage.Size == "" {
+			instance.Spec.TinySchedule.Storage.Size = "10Gi"
+		}
 		if pvc.CreationTimestamp.IsZero() {
 			storageClassName := instance.Spec.TinySchedule.Storage.StorageClassName
 			storageSize := resource.MustParse(instance.Spec.TinySchedule.Storage.Size)
