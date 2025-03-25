@@ -555,7 +555,7 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 	}
 
 	// 固定 HPA 参数（可根据需求调整）
-	minReplicas := int32(3)
+	minReplicas := int32(5)
 	maxReplicas := int32(10)
 	targetCPUUtilization := int32(80)
 	// 创建或更新 HPA
