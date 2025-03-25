@@ -390,7 +390,8 @@ func (r *TinykvReconciler) deployTinyKV(ctx context.Context, instance *kvv1alpha
 	svcOp, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		controllerutil.SetControllerReference(instance, svc, r.Scheme)
 		svc.Spec.ClusterIP = corev1.ClusterIPNone // Headless Service
-		svc.Spec.Selector = map[string]string{"app": "tinykv"}
+		labels := map[string]string{"app": instance.Name}
+		svc.Spec.Selector = labels
 		svc.Spec.Ports = []corev1.ServicePort{
 			{
 				Name:       "client",
